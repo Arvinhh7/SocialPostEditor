@@ -55,6 +55,110 @@ uvicorn app.main:app --reload
 6. 本人修改后调用 `POST /feedback`：保存初稿、终稿和修改原因。
 7. 后续生成会检索最相关的反馈案例，避免每次把所有修改历史都塞进上下文。
 
+## 生成运行轨迹
+
+每个候选内容从开始生成时就会创建运行记录。`GET /generations/{run_id}` 除了返回检索结果、初稿、审稿和终稿，还会返回按顺序排列的 `steps`：
+
+```text
+retrieve → contract → draft → review_1 → revise_1 → review_2 → final
+```
+
+每一步包含输入摘要、输出、模型供应商、模型名称、提示词版本、耗时、状态和错误信息。若模型在初稿、审稿或重写阶段失败，运行状态会保存为 `FAILED`，已经完成的步骤和具体失败步骤不会丢失。
+
+`contract` 是程序在写稿前生成的 Evidence Contract，记录本次内容的必写事实、允许出现的数字依据、禁用表达、角色规则、参考文章 ID 和确定性验收阈值。历史文章在合同中被明确限定为“只用于风格与判断方式”，不会自动成为事实来源。Draft、Reviewer 和 Revision 使用同一份合同，合同本身不调用模型。
+
+Reviewer 是独立的只读组件，不持有数据库和人工审批权限。审核模型调用失败、返回空内容或无法解析完整结论时，生成状态会变成 `BLOCKED`，审批状态为 `NOT_APPLICABLE`；系统不会把审核故障降级成 `PASS`，也不会在缺少有效审核结论时继续改稿。
+
+当前轨迹直接保存在 SQLite 中，没有引入 OpenTelemetry 或外部观测平台，适合现阶段固定且较短的 Agent 工作流。
+
+## 人工审批闭环
+
+自动审稿的 `PASS/REVISE` 与人工审批状态相互独立。成功生成后，内容进入：
+
+```text
+PENDING_REVIEW → APPROVED
+               → REJECTED
+```
+
+- `GET /review-inbox?role_id=2`：查看当前角色的待审核内容。
+- `POST /generations/{run_id}/review-actions`：编辑、批准或拒绝内容。
+- `GET /generations/{run_id}/review-actions`：查看不可覆盖的人工操作历史。
+
+编辑示例：
+
+```json
+{
+  "action": "EDIT",
+  "edited_text": "人工修改后的完整正文",
+  "reason": "减少模板表达，补充真实语气"
+}
+```
+
+批准示例：
+
+```json
+{
+  "action": "APPROVE",
+  "reason": "事实与语气已确认"
+}
+```
+
+拒绝必须填写原因：
+
+```json
+{
+  "action": "REJECT",
+  "reason": "缺少事实依据，需要重新生成"
+}
+```
+
+每个动作都会保存操作前文本、操作后文本和统一 diff。编辑已批准内容会使其重新进入 `PENDING_REVIEW`；失败的生成记录为 `NOT_APPLICABLE`，不能进行人工审批。当前系统仍不会自动发布内容。
+
+## 确定性评测
+
+评测只读取已经保存的生成记录，不会重新调用 OpenAI 或 DeepSeek。基本流程：
+
+1. `POST /eval-cases`：创建固定案例，在 `expected_data.relevant_post_ids` 中填写人工确认的相关文章 ID。
+2. `POST /eval-runs`：传入案例 ID 和已有的 `generation_run_id`，执行 Precision@K、Recall@K、MRR 和数字事实评分。
+3. `GET /eval-runs/{eval_run_id}`：查看各项分数、阈值、是否通过和原因。
+4. `POST /eval-runs/compare`：比较同一案例、同一指标版本下的多次评测结果。
+
+创建案例示例：
+
+```json
+{
+  "role_id": 2,
+  "name": "RAG 复盘检索案例",
+  "input_data": {
+    "topic": "第一次做 RAG 的复盘",
+    "platform": "LinkedIn",
+    "top_k": 4
+  },
+  "expected_data": {
+    "relevant_post_ids": [1, 2]
+  },
+  "tags": ["rag", "retrieval"],
+  "version": "1.0.0"
+}
+```
+
+执行评测：
+
+```json
+{
+  "eval_case_id": 1,
+  "generation_run_id": 3
+}
+```
+
+比较结果：
+
+```json
+{
+  "run_ids": [1, 2]
+}
+```
+
 也可以先写入内置演示语料：
 
 ```powershell
@@ -97,7 +201,14 @@ python -m app.cli demo
 | POST | `/retrieve` | 单独检查检索结果和评分解释 |
 | POST | `/generate` | 执行完整写作 Agent |
 | POST | `/feedback` | 保存人工终稿与修改原因 |
-| GET | `/generations/{run_id}` | 查看一次生成的检索、初稿、评审与终稿 |
+| GET | `/generations/{run_id}` | 查看一次生成的检索、逐步轨迹、初稿、评审与终稿 |
+| GET | `/review-inbox` | 按角色和状态查看人工审核队列 |
+| GET/POST | `/generations/{run_id}/review-actions` | 查看或新增编辑、批准、拒绝动作 |
+| GET/POST | `/eval-cases` | 查询或创建固定评测案例 |
+| GET | `/eval-cases/{eval_case_id}` | 查看评测案例详情 |
+| POST | `/eval-runs` | 对已有生成记录执行确定性评测 |
+| GET | `/eval-runs/{eval_run_id}` | 查看评测分数和失败原因 |
+| POST | `/eval-runs/compare` | 比较同一案例的多次评测结果 |
 
 ## 验证
 
@@ -109,7 +220,7 @@ $env:LLM_MODE="mock"
 python -m scripts.smoke_test
 ```
 
-测试覆盖中文字符 n-gram、相关语料排序、画像构建、生成—评审闭环、运行记录和未经允许的数字拦截。
+测试覆盖中文字符 n-gram、相关语料排序、画像构建、生成—评审闭环、成功与失败运行轨迹、人工编辑/批准/拒绝、非法审批转换、未经允许的数字拦截、确定性指标、评测 API 和结果比较。
 
 ## 重要边界
 

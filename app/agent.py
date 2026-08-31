@@ -4,12 +4,16 @@ import json
 import re
 from dataclasses import asdict
 from difflib import SequenceMatcher
-from typing import Any
+from time import perf_counter
+from typing import Any, Callable
 
 from .config import Settings
 from .db import Database
-from .llm import LLMClient, LLMError, extract_json
+from .evals.metrics import unsupported_number_issues
+from .llm import LLMClient, extract_json
+from .models import EvidenceContract
 from .retrieval import Retriever
+from .reviewer import IndependentReviewer
 
 
 DEFAULT_PROFILE = {
@@ -27,6 +31,7 @@ class WritingAgent:
         self.db = db
         self.settings = settings
         self.llm = LLMClient(settings)
+        self.reviewer = IndependentReviewer(self.llm)
         self.retriever = Retriever(settings.retrieval_mode)
 
     def rebuild_profile(self, role_id: int) -> dict[str, Any]:
@@ -73,12 +78,7 @@ class WritingAgent:
 
     @staticmethod
     def _numeric_claim_issues(text: str, proof_points: list[str]) -> list[str]:
-        allowed = " ".join(proof_points)
-        issues = []
-        for token in set(re.findall(r"(?<!\w)\d+(?:[.,]\d+)?%?", text)):
-            if token not in allowed:
-                issues.append(f"出现 proof_points 未支持的数字：{token}")
-        return issues
+        return unsupported_number_issues(text, proof_points)
 
     @staticmethod
     def _copy_issues(text: str, references: list[dict[str, Any]]) -> list[str]:
@@ -89,9 +89,34 @@ class WritingAgent:
                 issues.append(f"与历史样本 {reference['post_id']} 过度相似（{ratio:.0%}）")
         return issues
 
-    def _local_review(self, text: str, task: dict[str, Any], references: list[dict[str, Any]]) -> list[str]:
-        issues = self._numeric_claim_issues(text, task.get("proof_points", []))
-        for phrase in task.get("banned_phrases", []):
+    @staticmethod
+    def _build_evidence_contract(
+        task: dict[str, Any],
+        role: dict[str, Any],
+        references: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        proof_points = list(dict.fromkeys(str(item).strip() for item in task.get("proof_points", []) if str(item).strip()))
+        forbidden = list(dict.fromkeys(str(item).strip() for item in task.get("banned_phrases", []) if str(item).strip()))
+        contract = EvidenceContract(
+            required_points=proof_points,
+            allowed_numeric_claims=[point for point in proof_points if re.search(r"\d", point)],
+            forbidden_phrases=forbidden,
+            role_rules=str(role.get("identity_rules", "")),
+            reference_post_ids=[int(item["post_id"]) for item in references],
+            platform=str(task.get("platform", "")),
+            language=str(task.get("language", "")),
+            content_format=str(task.get("format", "")),
+        )
+        return contract.model_dump()
+
+    def _local_review(
+        self,
+        text: str,
+        evidence_contract: dict[str, Any],
+        references: list[dict[str, Any]],
+    ) -> list[str]:
+        issues = self._numeric_claim_issues(text, evidence_contract.get("required_points", []))
+        for phrase in evidence_contract.get("forbidden_phrases", []):
             if phrase.lower() in text.lower():
                 issues.append(f"包含禁用表达：{phrase}")
         issues.extend(self._copy_issues(text, references))
@@ -103,38 +128,85 @@ class WritingAgent:
         instructions = (
             "你是个性化社交媒体写作 Agent。严格按资料包写作。角色规则和 proof_points 是硬边界；"
             "历史文章只用于学习判断方式、节奏和语气，不得逐句仿写；反馈案例用于避免重复错误。"
-            "不要补充资料包之外的数字、客户、案例、结果或亲历。直接输出可发布正文，不解释过程。"
+            "Evidence Contract 是本次内容的事实与验收合同，必须满足 required_points 和 forbidden_phrases；"
+            "不要补充合同之外的数字、客户、案例、结果或亲历。直接输出可发布正文，不解释过程。"
         )
         payload = dict(package)
         payload["candidate_index"] = candidate_index
         return self.llm.complete(instructions, "任务资料(JSON)：" + json.dumps(payload, ensure_ascii=False), 2200).strip()
 
     def _review(self, text: str, package: dict[str, Any]) -> dict[str, Any]:
-        local_issues = self._local_review(text, package["task"], package["references"])
-        instructions = (
-            "你是独立风格与事实评审器。检查角色一致性、任务完成度、AI模板感、照抄、虚构事实、"
-            "宣传强度、CTA 和禁用表达。proof_points 之外的数字、客户结果、案例一律视为问题。"
-            "只返回 JSON：{\"verdict\":\"PASS|REVISE\",\"issues\":[...],\"revision_instruction\":\"...\"}。"
+        local_issues = self._local_review(text, package["evidence_contract"], package["references"])
+        return self.reviewer.evaluate(
+            text=text,
+            package=package,
+            deterministic_issues=local_issues,
         )
-        raw = self.llm.complete(instructions, json.dumps({"package": package, "draft": text, "local_issues": local_issues}, ensure_ascii=False), 1000)
-        try:
-            review = extract_json(raw)
-        except (LLMError, json.JSONDecodeError):
-            review = {"verdict": "REVISE" if local_issues else "PASS", "issues": [], "revision_instruction": ""}
-        review["issues"] = list(dict.fromkeys([*local_issues, *review.get("issues", [])]))
-        if review["issues"]:
-            review["verdict"] = "REVISE"
-            review["revision_instruction"] = review.get("revision_instruction") or "逐项修复 issues，不引入新事实。"
-        else:
-            review["verdict"] = "PASS"
-        return review
 
     def _revise(self, text: str, package: dict[str, Any], review: dict[str, Any]) -> str:
         instructions = (
             "你是定向改稿编辑。只修复评审指出的问题，保留原稿中合格的观点与语气。"
-            "不得引入 proof_points 之外的新数字、案例、客户结果或经历。直接输出完整修订正文。"
+            "必须继续遵守 Evidence Contract，不得引入合同之外的新数字、案例、客户结果或经历。直接输出完整修订正文。"
         )
-        return self.llm.complete(instructions, "任务资料(JSON)：" + json.dumps({"task": package["task"], "profile": package["profile"], "draft": text, "review": review}, ensure_ascii=False), 2200).strip()
+        return self.llm.complete(
+            instructions,
+            "任务资料(JSON)：" + json.dumps(
+                {
+                    "task": package["task"],
+                    "profile": package["profile"],
+                    "evidence_contract": package["evidence_contract"],
+                    "draft": text,
+                    "review": review,
+                },
+                ensure_ascii=False,
+            ),
+            2200,
+        ).strip()
+
+    def _traced_step(
+        self,
+        run_id: int,
+        step_index: int,
+        step_name: str,
+        step_input: dict[str, Any],
+        operation: Callable[[], Any],
+        prompt_version: str,
+    ) -> Any:
+        started = perf_counter()
+        try:
+            output = operation()
+        except Exception as exc:
+            self.db.add_generation_step(
+                run_id,
+                {
+                    "step_index": step_index,
+                    "step_name": step_name,
+                    "input": step_input,
+                    "output": {},
+                    "provider": self.llm.provider,
+                    "model": self.llm.model,
+                    "prompt_version": prompt_version,
+                    "duration_ms": round((perf_counter() - started) * 1000),
+                    "status": "FAILED",
+                    "error_message": str(exc)[:1000],
+                },
+            )
+            raise
+        self.db.add_generation_step(
+            run_id,
+            {
+                "step_index": step_index,
+                "step_name": step_name,
+                "input": step_input,
+                "output": output if isinstance(output, dict) else {"text": str(output)},
+                "provider": self.llm.provider,
+                "model": self.llm.model,
+                "prompt_version": prompt_version,
+                "duration_ms": round((perf_counter() - started) * 1000),
+                "status": "COMPLETED",
+            },
+        )
+        return output
 
     def generate(self, task: dict[str, Any]) -> dict[str, Any]:
         role_id = int(task["role_id"])
@@ -143,27 +215,145 @@ class WritingAgent:
             raise ValueError("Role not found")
         profile_record = self.db.latest_profile(role_id)
         profile = profile_record["profile"] if profile_record else DEFAULT_PROFILE
+        retrieval_started = perf_counter()
         references = self.retrieve(role_id, task, self.settings.retrieval_top_k)
+        retrieval_duration_ms = round((perf_counter() - retrieval_started) * 1000)
+        evidence_contract = self._build_evidence_contract(task, role, references)
         package = {
             "role": role,
             "profile": profile,
             "references": [{**hit, "text": _clip(hit["text"])} for hit in references],
             "feedback": self._feedback_examples(role_id, task),
             "task": task,
+            "evidence_contract": evidence_contract,
         }
         candidates = []
         for index in range(1, int(task.get("candidates", 1)) + 1):
-            draft = self._draft(package, index)
-            text, reviews = draft, []
-            for _ in range(self.settings.max_rewrite_rounds + 1):
-                review = self._review(text, package)
-                reviews.append(review)
-                if review["verdict"] == "PASS" or len(reviews) > self.settings.max_rewrite_rounds:
-                    break
-                text = self._revise(text, package, review)
-            final_review = reviews[-1]
-            run_id = self.db.save_generation(
-                {"role_id": role_id, "request": task, "retrieved": references, "draft": draft, "final_text": text, "review": reviews, "status": final_review["verdict"]}
+            run_id = self.db.start_generation(
+                {"role_id": role_id, "request": task, "retrieved": references, "status": "RUNNING"}
             )
-            candidates.append({"run_id": run_id, "draft": draft, "final_text": text, "status": final_review["verdict"], "reviews": reviews})
+            step_index = 1
+            self.db.add_generation_step(
+                run_id,
+                {
+                    "step_index": step_index,
+                    "step_name": "retrieve",
+                    "input": {"query": task, "top_k": self.settings.retrieval_top_k},
+                    "output": {
+                        "hits": [
+                            {"post_id": item["post_id"], "final_score": item["final_score"], "reason": item["reason"]}
+                            for item in references
+                        ]
+                    },
+                    "provider": "local",
+                    "model": self.settings.retrieval_mode,
+                    "prompt_version": "retrieval-v1",
+                    "duration_ms": retrieval_duration_ms,
+                    "status": "COMPLETED",
+                },
+            )
+            step_index += 1
+            self.db.add_generation_step(
+                run_id,
+                {
+                    "step_index": step_index,
+                    "step_name": "contract",
+                    "input": {
+                        "proof_point_count": len(task.get("proof_points", [])),
+                        "reference_post_ids": [item["post_id"] for item in references],
+                    },
+                    "output": evidence_contract,
+                    "provider": "local",
+                    "model": "rules",
+                    "prompt_version": "evidence-contract-v1",
+                    "duration_ms": 0,
+                    "status": "COMPLETED",
+                },
+            )
+            step_index += 1
+            draft, text, reviews = "", "", []
+            try:
+                draft = self._traced_step(
+                    run_id,
+                    step_index,
+                    "draft",
+                    {
+                        "candidate_index": index,
+                        "profile_version": profile_record["version"] if profile_record else None,
+                        "reference_post_ids": [item["post_id"] for item in references],
+                    },
+                    lambda: self._draft(package, index),
+                    "draft-v2",
+                )
+                text = draft
+                step_index += 1
+                for round_index in range(1, self.settings.max_rewrite_rounds + 2):
+                    review = self._traced_step(
+                        run_id,
+                        step_index,
+                        f"review_{round_index}",
+                        {"round": round_index, "text": _clip(text)},
+                        lambda current=text: self._review(current, package),
+                        "review-v2",
+                    )
+                    reviews.append(review)
+                    step_index += 1
+                    if review["verdict"] in {"PASS", "BLOCKED"} or len(reviews) > self.settings.max_rewrite_rounds:
+                        break
+                    text = self._traced_step(
+                        run_id,
+                        step_index,
+                        f"revise_{round_index}",
+                        {"round": round_index, "text": _clip(text), "review": review},
+                        lambda current=text, current_review=review: self._revise(current, package, current_review),
+                        "revise-v2",
+                    )
+                    step_index += 1
+                final_review = reviews[-1]
+                self.db.add_generation_step(
+                    run_id,
+                    {
+                        "step_index": step_index,
+                        "step_name": "final",
+                        "input": {"review_count": len(reviews)},
+                        "output": {"text": text, "status": final_review["verdict"]},
+                        "provider": "local",
+                        "model": "workflow",
+                        "prompt_version": "final-v1",
+                        "duration_ms": 0,
+                        "status": "COMPLETED",
+                    },
+                )
+                self.db.finish_generation(
+                    run_id,
+                    {
+                        "retrieved": references,
+                        "draft": draft,
+                        "final_text": text,
+                        "review": reviews,
+                        "status": final_review["verdict"],
+                    },
+                )
+            except Exception:
+                self.db.finish_generation(
+                    run_id,
+                    {
+                        "retrieved": references,
+                        "draft": draft,
+                        "final_text": text,
+                        "review": reviews,
+                        "status": "FAILED",
+                    },
+                )
+                raise
+            candidates.append(
+                {
+                    "run_id": run_id,
+                    "draft": draft,
+                    "final_text": text,
+                    "status": final_review["verdict"],
+                    "approval_status": "NOT_APPLICABLE" if final_review["verdict"] == "BLOCKED" else "PENDING_REVIEW",
+                    "reviews": reviews,
+                }
+            )
         return {"mode": self.settings.llm_mode, "provider": self.llm.provider, "model": self.llm.model, "profile_version": profile_record["version"] if profile_record else None, "retrieved": references, "candidates": candidates}

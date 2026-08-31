@@ -8,12 +8,24 @@ from .agent import WritingAgent
 from .config import settings
 from .db import Database
 from .documents import extract_text, split_posts
-from .models import FeedbackCreate, GenerationRequest, PostCreate, RetrievalRequest, RoleCreate
+from .evals import DeterministicEvalRunner, compare_eval_runs
+from .models import (
+    EvalCaseCreate,
+    EvalGenerationRequest,
+    EvalRunCompareRequest,
+    FeedbackCreate,
+    GenerationRequest,
+    PostCreate,
+    RetrievalRequest,
+    ReviewActionCreate,
+    RoleCreate,
+)
 
 
 db = Database(settings.database_path)
 db.init()
 agent = WritingAgent(db, settings)
+eval_runner = DeterministicEvalRunner(db)
 app = FastAPI(title="个性化社交媒体写作 Agent", version="0.1.0")
 
 
@@ -127,3 +139,94 @@ def generation(run_id: int) -> dict:
     if not result:
         raise HTTPException(status_code=404, detail="Generation run not found")
     return result
+
+
+@app.post("/eval-cases", status_code=201)
+def create_eval_case(payload: EvalCaseCreate) -> dict:
+    require_role(payload.role_id)
+    try:
+        return db.create_eval_case(payload.model_dump())
+    except Exception as exc:
+        if "UNIQUE" in str(exc):
+            raise HTTPException(status_code=409, detail="Evaluation case name and version already exist for this role") from exc
+        raise
+
+
+@app.get("/eval-cases")
+def list_eval_cases(role_id: int, active_only: bool = True) -> list[dict]:
+    require_role(role_id)
+    return db.list_eval_cases(role_id, active_only)
+
+
+@app.get("/eval-cases/{eval_case_id}")
+def get_eval_case(eval_case_id: int) -> dict:
+    result = db.get_eval_case(eval_case_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Evaluation case not found")
+    return result
+
+
+@app.post("/eval-runs", status_code=201)
+def run_evaluation(payload: EvalGenerationRequest) -> dict:
+    case = db.get_eval_case(payload.eval_case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Evaluation case not found")
+    generation_result = db.get_generation(payload.generation_run_id)
+    if not generation_result:
+        raise HTTPException(status_code=404, detail="Generation run not found")
+    if int(case["role_id"]) != int(generation_result["role_id"]):
+        raise HTTPException(status_code=422, detail="Evaluation case and generation must belong to the same role")
+    try:
+        return eval_runner.evaluate_generation(payload.eval_case_id, payload.generation_run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/eval-runs/compare")
+def compare_evaluation_runs(payload: EvalRunCompareRequest) -> dict:
+    try:
+        return compare_eval_runs(db, payload.run_ids)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if "not found" in detail else 422
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@app.get("/eval-runs/{eval_run_id}")
+def get_eval_run(eval_run_id: int) -> dict:
+    result = db.get_eval_run(eval_run_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Evaluation run not found")
+    return result
+
+
+@app.get("/review-inbox")
+def review_inbox(role_id: int, status: str = "PENDING_REVIEW") -> list[dict]:
+    require_role(role_id)
+    try:
+        return db.list_review_inbox(role_id, status)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/generations/{run_id}/review-actions")
+def list_review_actions(run_id: int) -> list[dict]:
+    if not db.get_generation(run_id):
+        raise HTTPException(status_code=404, detail="Generation run not found")
+    return db.list_review_actions(run_id)
+
+
+@app.post("/generations/{run_id}/review-actions", status_code=201)
+def create_review_action(run_id: int, payload: ReviewActionCreate) -> dict:
+    try:
+        action = db.add_review_action(run_id, payload.model_dump())
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if "not found" in detail else 409
+        raise HTTPException(status_code=status, detail=detail) from exc
+    generation_result = db.get_generation(run_id) or {}
+    return {
+        "review_action": action,
+        "approval_status": generation_result.get("approval_status"),
+        "current_text": generation_result.get("current_text"),
+    }
