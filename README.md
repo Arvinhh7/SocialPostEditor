@@ -2,6 +2,8 @@
 
 这是根据《个性化社交媒体写作 Agent：Python + RAG 项目入门指南》实现的可运行 MVP。它把角色隔离、历史语料检索、双语作者画像、事实边界、生成、独立评审、定向改写和人工反馈串成一条完整链路。
 
+如果希望先按操作顺序上手，并查看每个状态分支为什么发生，请阅读 [简明使用手册](SIMPLE_USAGE_GUIDE.md)。适合初学者的概念说明见 [RAG 项目入门指南](个性化社交媒体写作Agent_RAG项目入门指南.docx)，完整操作步骤见 [详细使用手册](个性化社交媒体写作Agent_详细使用手册.docx)。
+
 项目支持两种运行模式和两个在线供应商：
 
 - `mock`：默认模式，不需要 API Key，不访问网络，用于跑通接口、数据库、RAG 和反馈闭环。
@@ -48,12 +50,91 @@ uvicorn app.main:app --reload
 ## 第一次完整操作
 
 1. `GET /roles`：确认内置角色 `Alignment AI｜GEO 品牌传播` 的 `role_id` 为 `2`。
-2. `POST /posts`：逐条导入历史文章；或用 `POST /posts/upload` 上传 PDF、TXT、Markdown。
+2. 推荐用 `POST /posts/bulk-upload` 一次上传多个 PDF、TXT、Markdown；系统自动推断元数据并跳过重复内容。少量内容仍可用 `POST /posts`。
 3. `POST /profile/rebuild?role_id=2`：用真实性为 4–5 的文章生成双语作者画像。
 4. `POST /retrieve`：先观察当前任务会取回哪些文章以及每个分数分量。
 5. `POST /generate`：生成 1–3 个候选版本，并完成评审和最多两轮定向修改。
-6. 本人修改后调用 `POST /feedback`：保存初稿、终稿和修改原因。
-7. 后续生成会检索最相关的反馈案例，避免每次把所有修改历史都塞进上下文。
+6. 本人修改后调用 `POST /feedback`：保存初稿、终稿和修改原因；新反馈先进入 `CANDIDATE`，不会立即影响生成。
+7. 用 `POST /feedback/{feedback_id}/admission` 明确选择 `ADMIT` 或 `REJECT`。
+8. 后续生成只检索最相关的 `ADMITTED` 反馈，避免临时修改或错误反馈污染角色记忆。
+
+## 角色级任务默认值
+
+创建角色时可以把长期不变的生成参数保存在 `default_generate_params`：
+
+```json
+{
+  "name": "我的小红书账号",
+  "description": "分享 AI 产品实践",
+  "identity_rules": "不得虚构数据、客户和个人经历",
+  "default_generate_params": {
+    "platform": "小红书",
+    "language": "zh-CN",
+    "format": "项目复盘",
+    "audience": "AI 产品经理",
+    "tone": "真实、克制、具体",
+    "length": "500-800字",
+    "banned_phrases": ["颠覆行业", "绝对领先"]
+  }
+}
+```
+
+已有角色可通过 `PATCH /roles/{role_id}` 增加或更新默认值。调用 `/generate` 时按“系统默认 → 角色默认 → 本次显式参数”合并，因此通常只需要提交 `role_id`、`topic` 和 `proof_points`。本次请求明确传入的字段优先；例如传入 `"banned_phrases": []` 会清空本次任务的角色禁用词。生成响应中的 `effective_request` 会展示最终实际使用的完整参数。
+
+同一个人需要管理另一个平台账号时，可调用 `POST /roles/{role_id}/clone`：
+
+```json
+{
+  "name": "我的公众号账号",
+  "description": "同一作者的公众号版本",
+  "default_generate_params_overrides": {
+    "platform": "微信公众号",
+    "length": "1000-1500字"
+  }
+}
+```
+
+克隆会复制 `identity_rules` 和角色默认参数，并应用本次覆盖；不会复制历史文章、画像、生成记录或反馈，避免两个账号的长期记忆混在一起。覆盖字段传 `null` 可以从新角色中移除该项默认值。
+
+## 推荐的批量投喂方式
+
+在 Swagger 中打开 `POST /posts/bulk-upload`，一次选择最多 30 个文件。只必须填写 `role_id`；如果这批文件都来自本人，`authenticity` 保持默认值 4 即可。平台、语言、内容类型、主题和语气可留空，由系统自动推断；如果整批文章属于同一平台，也可以只填写一次公共平台。
+
+单文件 `POST /posts/upload` 与批量接口现在共用同一套提取、自动标注和去重逻辑。系统会：
+
+1. 从 PDF、TXT、Markdown 提取正文；
+2. 根据分隔线或 Markdown 标题自动拆成文章；
+3. 根据文件名和正文推断标题、平台、语言、类型、主题、语气及文件名日期；
+4. 通过规范化正文指纹跳过重复文章；
+5. 分别返回成功、重复跳过、失败和需要人工注意的警告。
+
+自动标注不确定时，可调用 `PATCH /posts/{post_id}` 只修改错误字段，无需重新上传正文：
+
+```json
+{
+  "platform": "小红书",
+  "topic": "RAG 项目复盘",
+  "authenticity": 5
+}
+```
+
+如果整批文章的同一个字段都标错，可调用 `PATCH /posts/bulk`：
+
+```json
+{
+  "role_id": 2,
+  "post_ids": [12, 13, 14],
+  "changes": {
+    "platform": "小红书",
+    "content_type": "项目复盘",
+    "authenticity": 5
+  }
+}
+```
+
+批量修改会校验所有文章都属于指定角色；只要有一个 ID 不存在或属于其他角色，整批都不会修改。
+
+单文件限制 10 MB，一批最多 50 MB。不确定来源或混有他人内容时，不要把整批 `authenticity` 设为 4–5。
 
 ## 生成运行轨迹
 
@@ -71,6 +152,36 @@ Reviewer 是独立的只读组件，不持有数据库和人工审批权限。�
 
 当前轨迹直接保存在 SQLite 中，没有引入 OpenTelemetry 或外部观测平台，适合现阶段固定且较短的 Agent 工作流。
 
+## 反馈经验准入
+
+反馈与角色的长期写作记忆之间增加了人工门禁：
+
+```text
+POST /feedback
+      ↓
+  CANDIDATE → ADMITTED（允许进入后续 RAG）
+            → REJECTED（永久排除）
+```
+
+- `GET /feedback?role_id=2&status=CANDIDATE`：查看等待判断的反馈。
+- `POST /feedback/{feedback_id}/admission`：提交 `{"action":"ADMIT","reason":"这是稳定偏好"}` 或 `{"action":"REJECT","reason":"只适用于一次活动"}`。
+- `GET /feedback/{feedback_id}/admission-actions`：查看准入决策记录。
+- 一条反馈只能从 `CANDIDATE` 决策一次，避免已经用于生成的经验被悄悄改写。
+- 升级前已经存在的反馈会迁移成 `ADMITTED`，保持旧版本行为；升级后新建的反馈必须显式准入。
+
+候选较多时，可调用 `POST /feedback/admission/bulk`：
+
+```json
+{
+  "role_id": 2,
+  "feedback_ids": [3, 4, 8],
+  "action": "ADMIT",
+  "reason": "这些修改都代表稳定的项目复盘偏好"
+}
+```
+
+一次最多 100 条，ID 自动去重。所有反馈必须属于指定角色且仍为 `CANDIDATE`；任意一条不满足条件时整批回滚。
+
 ## 人工审批闭环
 
 自动审稿的 `PASS/REVISE` 与人工审批状态相互独立。成功生成后，内容进入：
@@ -80,7 +191,7 @@ PENDING_REVIEW → APPROVED
                → REJECTED
 ```
 
-- `GET /review-inbox?role_id=2`：查看当前角色的待审核内容。
+- `GET /review-inbox?role_id=2&limit=100&offset=0`：分页查看当前角色的待审核内容。
 - `POST /generations/{run_id}/review-actions`：编辑、批准或拒绝内容。
 - `GET /generations/{run_id}/review-actions`：查看不可覆盖的人工操作历史。
 
@@ -113,6 +224,26 @@ PENDING_REVIEW → APPROVED
 ```
 
 每个动作都会保存操作前文本、操作后文本和统一 diff。编辑已批准内容会使其重新进入 `PENDING_REVIEW`；失败的生成记录为 `NOT_APPLICABLE`，不能进行人工审批。当前系统仍不会自动发布内容。
+
+审核列表中的每一项直接包含 `review_summary`，其中有自动状态、审核次数、改写次数、累计问题、阻塞原因和可直接展示的摘要文本。一般无需先打开生成详情，就能知道内容为什么被改写以及是否仍有问题。
+
+## 检索结果负反馈
+
+如果 `retrieved` 中某篇文章只是不适合当前任务，可调用 `POST /generations/{run_id}/retrieval-feedback`。
+
+```json
+{
+  "post_id": 12,
+  "action": "NOT_RELEVANT",
+  "reason": "主题相似，但观点不适合这次任务"
+}
+```
+
+- `NOT_RELEVANT`：只记录本次召回错误，不改变文章真实性和全局状态；响应以 `effect=RECORDED_ONLY` 明确说明当前只用于审计。
+
+文章已经过时或不再代表当前风格时，调用 `POST /posts/{post_id}/retrieval-status`，提交 `RETIRE`；需要恢复时向同一接口提交 `RESTORE`。这两个动作属于文章全局生命周期，不再依赖某一次历史生成记录。
+
+任务级负反馈只接受本次 `retrieved` 中实际出现过、且属于同一角色的文章。通过 `GET /generations/{run_id}/retrieval-feedback` 查看任务级记录；通过 `GET /posts/{post_id}/retrieval-actions` 查看停用与恢复审计，通过 `GET /posts?role_id=2&status=RETIRED` 查看停用文章。
 
 ## 确定性评测
 
@@ -194,14 +325,25 @@ python -m app.cli demo
 |---|---|---|
 | GET | `/health` | 运行状态与当前模式 |
 | GET/POST | `/roles` | 查询或创建角色 |
+| PATCH | `/roles/{role_id}` | 更新角色规则和默认生成参数 |
+| POST | `/roles/{role_id}/clone` | 克隆角色规则和默认参数，不复制记忆 |
 | GET/POST | `/posts` | 查询或新增语料 |
 | POST | `/posts/upload` | 上传并拆分 PDF/TXT/Markdown |
+| POST | `/posts/bulk-upload` | 多文件上传、自动标注并跳过重复内容 |
+| PATCH | `/posts/{post_id}` | 纠正导入后的文章元数据 |
+| PATCH | `/posts/bulk` | 按角色批量修正多篇文章的元数据 |
+| POST | `/posts/{post_id}/retrieval-status` | 全局停用或恢复文章的 RAG 资格 |
+| GET | `/posts/{post_id}/retrieval-actions` | 查看文章停用与恢复审计 |
 | GET | `/profile` | 查看最新作者画像 |
 | POST | `/profile/rebuild` | 重建画像版本 |
 | POST | `/retrieve` | 单独检查检索结果和评分解释 |
 | POST | `/generate` | 执行完整写作 Agent |
-| POST | `/feedback` | 保存人工终稿与修改原因 |
+| GET/POST | `/feedback` | 查询反馈，或创建待准入的人工反馈 |
+| POST | `/feedback/admission/bulk` | 批量准入或拒绝候选反馈 |
+| POST | `/feedback/{feedback_id}/admission` | 准入或拒绝一条候选反馈 |
+| GET | `/feedback/{feedback_id}/admission-actions` | 查看反馈准入审计记录 |
 | GET | `/generations/{run_id}` | 查看一次生成的检索、逐步轨迹、初稿、评审与终稿 |
+| GET/POST | `/generations/{run_id}/retrieval-feedback` | 查看或提交检索命中负反馈 |
 | GET | `/review-inbox` | 按角色和状态查看人工审核队列 |
 | GET/POST | `/generations/{run_id}/review-actions` | 查看或新增编辑、批准、拒绝动作 |
 | GET/POST | `/eval-cases` | 查询或创建固定评测案例 |
@@ -220,7 +362,7 @@ $env:LLM_MODE="mock"
 python -m scripts.smoke_test
 ```
 
-测试覆盖中文字符 n-gram、相关语料排序、画像构建、生成—评审闭环、成功与失败运行轨迹、人工编辑/批准/拒绝、非法审批转换、未经允许的数字拦截、确定性指标、评测 API 和结果比较。
+当前共有 57 项离线测试，覆盖中文字符 n-gram、混合检索排序、角色默认参数、批量导入与事务回滚、画像构建、生成—评审闭环、成功与失败运行轨迹、人工编辑/批准/拒绝、反馈准入、文章停用恢复、未经允许的数字拦截、确定性指标、评测 API 和结果比较。
 
 ## 重要边界
 

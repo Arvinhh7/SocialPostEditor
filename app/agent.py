@@ -11,7 +11,7 @@ from .config import Settings
 from .db import Database
 from .evals.metrics import unsupported_number_issues
 from .llm import LLMClient, extract_json
-from .models import EvidenceContract
+from .models import EvidenceContract, GenerationRequest
 from .retrieval import Retriever
 from .reviewer import IndependentReviewer
 
@@ -38,7 +38,11 @@ class WritingAgent:
         role = self.db.get_role(role_id)
         if not role:
             raise ValueError("Role not found")
-        posts = [p for p in self.db.list_posts(role_id) if int(p.get("authenticity", 3)) >= 4]
+        posts = [
+            post
+            for post in self.db.list_posts(role_id, "ACTIVE")
+            if int(post.get("authenticity", 3)) >= 4
+        ]
         if not posts:
             raise ValueError("At least one post with authenticity >= 4 is required")
         samples = [{"id": p["id"], "language": p["language"], "topic": p["topic"], "text": _clip(p["text"])} for p in posts[:30]]
@@ -55,11 +59,13 @@ class WritingAgent:
     def retrieve(self, role_id: int, query: dict[str, Any], top_k: int | None = None) -> list[dict[str, Any]]:
         if not self.db.get_role(role_id):
             raise ValueError("Role not found")
-        hits = self.retriever.search(self.db.list_posts(role_id), query, top_k or self.settings.retrieval_top_k)
+        hits = self.retriever.search(
+            self.db.list_posts(role_id, "ACTIVE"), query, top_k or self.settings.retrieval_top_k
+        )
         return [hit.to_dict() for hit in hits]
 
-    def _feedback_examples(self, role_id: int, query: dict[str, Any], top_k: int = 2) -> list[dict[str, str]]:
-        rows = self.db.list_feedback(role_id)
+    def _feedback_examples(self, role_id: int, query: dict[str, Any], top_k: int = 2) -> list[dict[str, Any]]:
+        rows = self.db.list_feedback(role_id, "ADMITTED")
         if not rows:
             return []
         pseudo_posts = [
@@ -72,9 +78,27 @@ class WritingAgent:
         ]
         ids = {hit.post_id for hit in self.retriever.search(pseudo_posts, query, top_k)}
         return [
-            {"draft": _clip(row["draft"], 900), "final_text": _clip(row["final_text"], 900), "reason": row["reason"]}
+            {
+                "feedback_id": row["id"],
+                "draft": _clip(row["draft"], 900),
+                "final_text": _clip(row["final_text"], 900),
+                "reason": row["reason"],
+            }
             for row in rows if row["id"] in ids
         ]
+
+    def resolve_generation_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Resolve system defaults, role defaults, and explicit request values once."""
+        role_id = int(task["role_id"])
+        role = self.db.get_role(role_id)
+        if not role:
+            raise ValueError("Role not found")
+        topic = str(task.get("topic", ""))
+        system_defaults = GenerationRequest(role_id=role_id, topic=topic).model_dump()
+        role_defaults = role.get("default_generate_params", {})
+        return GenerationRequest.model_validate(
+            {**system_defaults, **role_defaults, **task}
+        ).model_dump()
 
     @staticmethod
     def _numeric_claim_issues(text: str, proof_points: list[str]) -> list[str]:
@@ -209,6 +233,12 @@ class WritingAgent:
         return output
 
     def generate(self, task: dict[str, Any]) -> dict[str, Any]:
+        effective_task = self.resolve_generation_task(task)
+        result = self._generate_effective(effective_task)
+        result["effective_request"] = effective_task
+        return result
+
+    def _generate_effective(self, task: dict[str, Any]) -> dict[str, Any]:
         role_id = int(task["role_id"])
         role = self.db.get_role(role_id)
         if not role:

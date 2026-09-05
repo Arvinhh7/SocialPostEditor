@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from app.agent import WritingAgent
@@ -13,11 +15,15 @@ from app.db import Database
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     with tempfile.TemporaryDirectory(prefix="social-agent-smoke-") as directory:
         db = Database(Path(directory) / "smoke.db")
         db.init()
         seed(db)
-        agent = WritingAgent(db, settings)
+        # A smoke test must be deterministic and must never spend API quota just
+        # because the developer's local .env happens to enable live mode.
+        agent = WritingAgent(db, replace(settings, llm_mode="mock"))
         profile = agent.rebuild_profile(2)
         query = {
             "role_id": 2,

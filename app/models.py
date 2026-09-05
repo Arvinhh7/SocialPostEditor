@@ -5,10 +5,51 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+class RoleGenerateDefaults(BaseModel):
+    """Stable generation preferences inherited by requests for one role."""
+
+    platform: str | None = Field(default=None, max_length=80)
+    language: str | None = Field(default=None, max_length=40)
+    format: str | None = Field(default=None, max_length=80)
+    goal: str | None = Field(default=None, max_length=1000)
+    audience: str | None = Field(default=None, max_length=500)
+    tone: str | None = Field(default=None, max_length=200)
+    length: str | None = Field(default=None, max_length=80)
+    banned_phrases: list[str] | None = Field(default=None, max_length=30)
+    cta: str | None = Field(default=None, max_length=500)
+    candidates: int | None = Field(default=None, ge=1, le=3)
+
+    @field_validator("banned_phrases")
+    @classmethod
+    def clean_banned_phrases(cls, items: list[str] | None) -> list[str] | None:
+        if items is None:
+            return None
+        return list(dict.fromkeys(item.strip() for item in items if item.strip()))
+
 class RoleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=3000)
     identity_rules: str = Field(default="", max_length=5000)
+    default_generate_params: RoleGenerateDefaults = Field(default_factory=RoleGenerateDefaults)
+
+
+class RoleUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=3000)
+    identity_rules: str | None = Field(default=None, max_length=5000)
+    default_generate_params: RoleGenerateDefaults | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> "RoleUpdate":
+        if not self.model_fields_set:
+            raise ValueError("At least one role field is required")
+        return self
+
+
+class RoleCloneRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=3000)
+    default_generate_params_overrides: RoleGenerateDefaults | None = None
 
 
 class PostCreate(BaseModel):
@@ -23,6 +64,41 @@ class PostCreate(BaseModel):
     authenticity: int = Field(default=3, ge=1, le=5)
     published_at: str | None = None
     source_name: str = Field(default="manual", max_length=300)
+
+
+class PostMetadataUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    platform: str | None = Field(default=None, max_length=80)
+    language: str | None = Field(default=None, max_length=40)
+    content_type: str | None = Field(default=None, max_length=80)
+    topic: str | None = Field(default=None, max_length=300)
+    tone: str | None = Field(default=None, max_length=200)
+    authenticity: int | None = Field(default=None, ge=1, le=5)
+    published_at: str | None = None
+
+    @field_validator("title", "platform", "language", "content_type", "topic", "tone", mode="before")
+    @classmethod
+    def strip_metadata_strings(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def require_change(self) -> "PostMetadataUpdate":
+        if not self.model_fields_set:
+            raise ValueError("At least one metadata field is required")
+        return self
+
+
+class PostBulkMetadataUpdate(BaseModel):
+    role_id: int = Field(gt=0)
+    post_ids: list[int] = Field(min_length=1, max_length=500)
+    changes: PostMetadataUpdate
+
+    @field_validator("post_ids")
+    @classmethod
+    def clean_post_ids(cls, post_ids: list[int]) -> list[int]:
+        if any(post_id <= 0 for post_id in post_ids):
+            raise ValueError("post_ids must contain positive integers")
+        return list(dict.fromkeys(post_ids))
 
 
 class RetrievalRequest(BaseModel):
@@ -65,6 +141,64 @@ class FeedbackCreate(BaseModel):
     final_text: str = Field(min_length=1)
     reason: str = Field(default="", max_length=3000)
     similarity_rating: int | None = Field(default=None, ge=1, le=5)
+
+
+class FeedbackAdmissionDecision(BaseModel):
+    """An explicit human decision about whether feedback may influence future writing."""
+
+    action: Literal["ADMIT", "REJECT"]
+    reason: str = Field(default="", max_length=3000)
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "FeedbackAdmissionDecision":
+        self.reason = self.reason.strip()
+        if self.action == "REJECT" and not self.reason:
+            raise ValueError("reason is required for REJECT")
+        return self
+
+
+class FeedbackBulkAdmissionDecision(BaseModel):
+    role_id: int = Field(gt=0)
+    feedback_ids: list[int] = Field(min_length=1, max_length=100)
+    action: Literal["ADMIT", "REJECT"]
+    reason: str = Field(default="", max_length=3000)
+
+    @field_validator("feedback_ids")
+    @classmethod
+    def clean_feedback_ids(cls, feedback_ids: list[int]) -> list[int]:
+        if any(feedback_id <= 0 for feedback_id in feedback_ids):
+            raise ValueError("feedback_ids must contain positive integers")
+        return list(dict.fromkeys(feedback_ids))
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "FeedbackBulkAdmissionDecision":
+        self.reason = self.reason.strip()
+        if self.action == "REJECT" and not self.reason:
+            raise ValueError("reason is required for REJECT")
+        return self
+
+
+class RetrievalFeedbackCreate(BaseModel):
+    post_id: int = Field(gt=0)
+    action: Literal["NOT_RELEVANT"] = "NOT_RELEVANT"
+    reason: str = Field(default="", max_length=3000)
+
+    @model_validator(mode="after")
+    def validate_feedback(self) -> "RetrievalFeedbackCreate":
+        self.reason = self.reason.strip()
+        if not self.reason:
+            raise ValueError("reason is required for NOT_RELEVANT")
+        return self
+
+
+class PostRetrievalStatusUpdate(BaseModel):
+    action: Literal["RETIRE", "RESTORE"]
+    reason: str = Field(min_length=1, max_length=3000)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class ReviewResult(BaseModel):

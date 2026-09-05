@@ -360,7 +360,7 @@ def build():
         doc.add_paragraph()
     kicker = doc.add_paragraph()
     kicker.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    set_run_font(kicker.add_run("OPERATOR GUIDE · V1.0"), size=10, bold=True, color=BLUE)
+    set_run_font(kicker.add_run("OPERATOR GUIDE · V1.1"), size=10, bold=True, color=BLUE)
     title = doc.add_paragraph("个性化社交媒体写作 Agent", style="Title")
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title.paragraph_format.space_after = Pt(10)
@@ -376,7 +376,7 @@ def build():
         doc.add_paragraph()
     meta = doc.add_paragraph()
     meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    set_run_font(meta.add_run("适用项目：SocialPostEditor\n默认模型：DeepSeek（可切换 OpenAI）\n更新日期：2026 年 8 月 5 日"), size=10, color=MUTED)
+    set_run_font(meta.add_run("适用项目：SocialPostEditor\n运行模式：mock / DeepSeek / OpenAI\n更新日期：2026 年 9 月 4 日"), size=10, color=MUTED)
     doc.add_page_break()
 
     add_heading(doc, "阅读地图", 1)
@@ -418,12 +418,12 @@ def build():
     add_heading(doc, "3. 推荐的完整使用顺序", 1)
     for item in (
         "创建角色并记住返回的 role_id。",
-        "导入该角色过去真实发布的文章，并填写平台、语言、类型、主题、语气和真实性。",
+        "批量导入该角色过去真实发布的文章，由系统自动拆分、标注和去重，再人工纠错。",
         "调用画像重建，只让高真实性样本参与作者画像。",
         "先调用检索接口，检查本次主题会取回哪些历史文章。",
         "提交生成任务，明确 proof_points、禁用表达和 CTA。",
-        "从 1–3 个候选稿中选择并人工修改。",
-        "保存“初稿—终稿—修改原因”，形成反馈闭环。",
+        "在 review-inbox 中查看审核摘要，编辑并明确批准或拒绝内容。",
+        "保存“初稿—终稿—修改原因”，再人工决定是否准入长期记忆。",
         "积累一批任务后，根据真实效果调整标签、检索权重或模型。",
     ):
         add_list_item(doc, item, ordered=True)
@@ -434,13 +434,14 @@ def build():
     add_body(doc, "角色不是昵称，而是一套独立的数据空间。每个角色拥有自己的文章、画像、反馈和生成记录。品牌官方账号、创始人个人账号、产品账号应尽量拆成不同角色。")
     add_heading(doc, "4.1 在 Swagger 中创建", 2)
     add_body(doc, "找到 POST /roles，点击 Try it out，填写：")
-    add_code(doc, '{\n  "name": "Hao｜AI 创业者个人账号",\n  "description": "面向创业者、品牌负责人和 AI 从业者，分享 AI 产品、GEO、创业实践与品牌传播观察。",\n  "identity_rules": "只描述真实经历；不得虚构客户、融资、收入或效果；没有 proof_points 支持时不得使用具体数字；不承诺品牌一定能在 AI 回答中排名第一。"\n}')
+    add_code(doc, '{\n  "name": "Hao｜AI 创业者个人账号",\n  "description": "面向创业者、品牌负责人和 AI 从业者，分享 AI 产品与 GEO 实践。",\n  "identity_rules": "只描述真实经历；不得虚构客户、融资、收入或效果。",\n  "default_generate_params": {\n    "platform": "LinkedIn",\n    "language": "zh-CN",\n    "audience": "品牌与 AI 从业者",\n    "tone": "克制、具体、基于证据",\n    "banned_phrases": ["绝对领先", "颠覆行业"]\n  }\n}')
     add_body(doc, "提交后会返回 id。假设返回 id=3，那么以后导入文章、构建画像、生成和保存反馈都要使用 role_id=3。")
     add_heading(doc, "4.2 角色字段怎么写", 2)
     add_table(doc, ["字段", "填写方法"], [
         ("name", "可识别的账号身份，例如“品牌官方｜中文”或“创始人｜个人观点”"),
         ("description", "受众、核心主题、业务范围、传播任务以及不处理的领域"),
         ("identity_rules", "不可虚构的身份、经历、客户、数字、承诺和法律/合规边界"),
+        ("default_generate_params", "角色长期复用的平台、受众、语气、长度和禁用词"),
         ("role_id", "系统返回的角色编号；后续所有资料都通过它隔离"),
     ], [1800, 7560], first_col_bold=True)
     add_heading(doc, "4.3 什么时候应该拆角色", 2)
@@ -451,6 +452,9 @@ def build():
         "客户代运营账号：每个客户必须独立角色，不能共享文章和反馈。",
     ):
         add_list_item(doc, item)
+    add_heading(doc, "4.4 更新与克隆角色", 2)
+    add_body(doc, "使用 PATCH /roles/{role_id} 修改身份规则或角色默认生成参数。需要同一作者管理另一个平台时，使用 POST /roles/{role_id}/clone；它复制 identity_rules 和默认参数，但不复制历史文章、画像、反馈或生成记录。")
+    add_callout(doc, "参数优先级", "生成时按“系统默认值 → 角色默认值 → 本次请求显式值”合并。本次请求优先，响应中的 effective_request 是最终实际使用的完整参数。")
 
     add_heading(doc, "5. 投喂过去的文章", 1)
     add_body(doc, "投喂的目标不是让模型死记原文，而是建立可检索的真实写作样本。每篇文章应作为独立 Post 入库。不要只保存标题或链接。")
@@ -479,11 +483,14 @@ def build():
     add_callout(doc, "注意", "真实性不是流量分。高流量文章不一定最像本人；表现普通但充分体现判断方式的文章，往往更适合画像。")
 
     add_heading(doc, "5.4 方式二：批量上传", 2)
-    add_body(doc, "使用 POST /posts/upload，可上传 PDF、TXT 或 Markdown，单文件最大 10 MB。上传时填写的 platform、language、content_type、topic、tone 和 authenticity 会应用到本次拆出的所有文章。")
+    add_body(doc, "推荐使用 POST /posts/bulk-upload，一次选择最多 30 个 PDF、TXT 或 Markdown 文件；单文件最大 10 MB、整批最大 50 MB。只需填写一次 role_id 和真实性，其余元数据可以留空。POST /posts/upload 与它共用同一套自动标注和去重逻辑。")
     add_body(doc, "推荐使用 Markdown，并通过 --- 分隔文章：")
     add_code(doc, "# 为什么品牌不能保证第一推荐\n\n第一篇文章完整正文……\n\n---\n\n# 隐藏文字会带来什么风险\n\n第二篇文章完整正文……\n\n---\n\n# AI Visibility 应该如何衡量\n\n第三篇文章完整正文……")
-    add_body(doc, "如果文章平台、语言或类型不同，分成多个文件上传，例如 linkedin-zh-education.md、linkedin-en-education.md、wechat-product.md。不要给完全不同的文章统一贴同一组标签。")
-    add_heading(doc, "5.5 语料质量检查", 2)
+    add_body(doc, "系统会根据文件名和正文推断标题、平台、语言、内容类型、主题、语气与发布日期，并用规范化正文指纹跳过重复文章。批量数据库写入在一个事务中完成，写入异常时整批回滚。")
+    add_heading(doc, "5.5 导入后纠错", 2)
+    add_body(doc, "自动标注不确定时，使用 PATCH /posts/{post_id} 修正单篇；同一批文章标错时，使用 PATCH /posts/bulk 提交 role_id、post_ids 和 changes。批量修正会先验证全部文章属于该角色，任意一条不符合时整批不修改。")
+    add_code(doc, '{\n  "role_id": 3,\n  "post_ids": [12, 13, 14],\n  "changes": {"platform": "小红书", "content_type": "项目复盘", "authenticity": 5}\n}')
+    add_heading(doc, "5.6 语料质量检查", 2)
     for item in (
         "正文完整：不要只传标题、摘要或链接。",
         "角色正确：确认 role_id 没有填成其他账号。",
@@ -496,7 +503,7 @@ def build():
 
     doc.add_page_break()
     add_heading(doc, "6. 构建作者画像", 1)
-    add_body(doc, "导入高真实性文章后，调用 POST /profile/rebuild?role_id=3。系统只选择 authenticity 为 4–5 的文章，最多使用 30 篇，并生成中英文画像。")
+    add_body(doc, "导入高真实性文章后，调用 POST /profile/rebuild?role_id=3。系统只选择 retrieval_status=ACTIVE 且 authenticity 为 4–5 的文章，最多使用 30 篇，并生成中英文画像。")
     add_body(doc, "画像包含价值观、voice、openings、rhythm、CTA 和 avoid。每次重建会保存新版本，不覆盖旧版本。使用 GET /profile?role_id=3 查看最新版本。")
     add_callout(doc, "常见报错", "如果返回“At least one post with authenticity >= 4 is required”，说明该角色没有高真实性样本。请先导入至少一篇 authenticity=4 或 5 的完整文章。")
     add_heading(doc, "画像与 RAG 的区别", 2)
@@ -521,9 +528,12 @@ def build():
     add_code(doc, '{\n  "role_id": 3,\n  "topic": "为什么不能保证品牌成为 ChatGPT 第一推荐",\n  "platform": "LinkedIn",\n  "language": "zh-CN",\n  "format": "风险教育",\n  "tone": "克制, 基于证据",\n  "goal": "澄清市场误区",\n  "audience": "品牌市场负责人",\n  "top_k": 4\n}')
     add_body(doc, "重点查看 final_score、各分量得分、reason 和正文是否真的适合参考。如果结果不理想，依次检查 topic、content_type、tone、language、platform 和任务描述。")
     add_callout(doc, "不要这样做", "不要为了凑满 Top-K 而接受明显无关文章，也不要一开始就盲目修改检索权重。多数早期问题来自标签含糊、语料重复或任务描述太宽。")
+    add_heading(doc, "7.3 检索纠错与文章停用", 2)
+    add_body(doc, "某篇命中文章只是不适合本次任务时，向 POST /generations/{run_id}/retrieval-feedback 提交 NOT_RELEVANT。当前该动作返回 effect=RECORDED_ONLY，只留下任务级审计，不会暗中修改排序或真实性。")
+    add_body(doc, "文章已经过时或不再代表本人时，向 POST /posts/{post_id}/retrieval-status 提交 RETIRE；人工确认恢复时提交 RESTORE。只有 ACTIVE 文章能进入后续 RAG 和画像重建，所有停用与恢复动作可通过 /posts/{post_id}/retrieval-actions 查询。")
 
     add_heading(doc, "8. 提交生成任务", 1)
-    add_body(doc, "调用 POST /generate。建议第一次让系统生成 3 个候选版本，比较结构和语气后再人工选择。")
+    add_body(doc, "调用 POST /generate。角色已配置 default_generate_params 时，通常只需要提交 role_id、topic 和 proof_points；需要变化的字段在本次请求中覆盖。建议第一次生成 3 个候选版本。")
     add_code(doc, '{\n  "role_id": 3,\n  "topic": "品牌能否保证在 ChatGPT 中成为第一推荐？",\n  "platform": "LinkedIn",\n  "language": "zh-CN",\n  "format": "教育型短文",\n  "goal": "澄清常见误区并建立可信度",\n  "audience": "品牌市场负责人",\n  "tone": "克制、教育型、基于证据",\n  "length": "300-500字",\n  "banned_phrases": ["绝对保证", "颠覆行业", "不可逆趋势"],\n  "proof_points": [\n    "模型回答会受到问题表达、上下文和可用信息影响",\n    "不同问题可能得到不同推荐结果"\n  ],\n  "cta": "邀请读者分享他们观察 AI 品牌可见性的方式。",\n  "candidates": 3\n}')
     add_heading(doc, "8.1 生成字段说明", 2)
     add_table(doc, ["字段", "填写原则"], [
@@ -540,6 +550,7 @@ def build():
         ("cta", "希望使用的低压力或明确行动邀请"),
         ("candidates", "1–3 个候选版本"),
     ], [2200, 7160], first_col_bold=True)
+    add_callout(doc, "核对实际参数", "查看响应中的 effective_request。它展示系统默认值、角色默认值和本次显式参数合并后的最终结果；HTTP、CLI 和代码直接调用现在使用同一套解析逻辑。")
     add_heading(doc, "8.2 proof_points 怎么写", 2)
     add_body(doc, "proof_points 应该是可确认、可公开、与本次任务有关的事实。")
     add_table(doc, ["好的 proof point", "不合格的写法"], [
@@ -558,7 +569,10 @@ def build():
         ("定向改写", "只修复 issues 中的问题，不引入新事实"),
         ("停止条件", "PASS，或完成最多两次改写"),
     ], [2200, 7160], first_col_bold=True)
-    add_body(doc, "每次生成会返回 run_id、初稿、终稿、状态、评审记录和检索文章。使用 GET /generations/{run_id} 可以回看完整运行资料。")
+    add_body(doc, "每次生成会返回 run_id、初稿、终稿、状态、评审记录、检索文章、effective_request 和按顺序保存的运行 steps。使用 GET /generations/{run_id} 可以回看完整运行资料。")
+    add_heading(doc, "9.1 人工审批闭环", 2)
+    add_body(doc, "成功生成后不会自动发布，而是进入 PENDING_REVIEW。使用 GET /review-inbox?role_id=3&status=PENDING_REVIEW&limit=100&offset=0 分页查看；列表中的 review_summary 直接说明审核次数、改写轮数、累计问题和阻塞原因。")
+    add_body(doc, "向 POST /generations/{run_id}/review-actions 提交 EDIT、APPROVE 或 REJECT。EDIT 保存人工终稿并继续等待批准；APPROVE 确认发布前版本；REJECT 必须填写原因。每个动作都保留前后文本和 diff，编辑已批准内容会重新进入待审。")
 
     add_heading(doc, "10. 保存人工反馈", 1)
     add_body(doc, "真正让系统越来越像本人的数据，是“Agent 初稿—本人终稿—修改原因”。调用 POST /feedback：")
@@ -572,7 +586,10 @@ def build():
         "记录 CTA 偏好：例如“不要预约演示，改成邀请分享观察”。",
     ):
         add_list_item(doc, item)
-    add_body(doc, "后续任务只会检索最相关的少量反馈案例，不会把全部历史修改都塞进模型上下文。")
+    add_body(doc, "新反馈先进入 CANDIDATE，不会立即影响生成。人工确认它代表稳定偏好后，向 POST /feedback/{feedback_id}/admission 提交 ADMIT；一次性活动要求或错误修改提交 REJECT。只有 ADMITTED 反馈会进入后续检索。")
+    add_heading(doc, "10.2 批量准入反馈", 2)
+    add_body(doc, "候选反馈较多时，使用 POST /feedback/admission/bulk，一次最多处理 100 条。所有 ID 必须属于指定角色且仍为 CANDIDATE，任一条不符合时整批回滚。")
+    add_code(doc, '{\n  "role_id": 3,\n  "feedback_ids": [21, 22, 23],\n  "action": "ADMIT",\n  "reason": "均代表稳定的写作偏好"\n}')
 
     doc.add_page_break()
     add_heading(doc, "11. 一次完整示例", 1)
@@ -580,13 +597,13 @@ def build():
     add_body(doc, "你要为个人 LinkedIn 写一篇中文文章，解释“品牌是否能购买 ChatGPT 第一推荐”。")
     steps = [
         ("确认角色", "GET /roles，确认个人账号的 role_id=3。"),
-        ("准备语料", "导入过去关于 GEO、品牌风险、AI Visibility 的真实文章，代表性文章设为 4–5。"),
+        ("准备语料", "用 /posts/bulk-upload 导入真实文章，检查自动标签，代表性文章设为 4–5。"),
         ("构建画像", "POST /profile/rebuild?role_id=3，检查中文画像是否符合本人。"),
         ("检查检索", "POST /retrieve，确认前几篇确实讨论第一推荐、承诺风险或 AI 可见性。"),
         ("准备事实", "把“回答受问题表达、上下文和可用信息影响”等可公开事实写入 proof_points。"),
         ("生成候选", "POST /generate，candidates=3。"),
-        ("人工选择", "选出最接近本人的版本，删除仍显营销或不准确的句子。"),
-        ("保存反馈", "POST /feedback，写明删改原因。"),
+        ("人工审批", "在 review-inbox 中编辑候选，确认事实后 APPROVE 或说明原因 REJECT。"),
+        ("保存反馈", "POST /feedback 写明删改原因，再决定 ADMIT 或 REJECT。"),
         ("回看记录", "GET /generations/{run_id}，确认检索、评审和终稿均已保存。"),
     ]
     add_table(doc, ["步骤", "操作"], steps, [1800, 7560], first_col_bold=True)
@@ -599,16 +616,16 @@ def build():
         "先检索，后生成。",
         "生成 1–3 个候选，不自动发布。",
         "人工核对事实、身份和敏感信息。",
-        "保存有代表性的修改反馈。",
+        "保存有代表性的修改反馈，并只准入稳定偏好。",
     ):
         add_list_item(doc, item, ordered=True)
     add_heading(doc, "12.2 每周检查", 2)
     for item in (
-        "哪些主题经常检索到错误文章？",
+        "哪些主题经常出现 NOT_RELEVANT 记录？",
         "哪些标签过宽、过细或写法不一致？",
         "是否出现大量重复文章？",
         "哪些反馈原因反复出现？",
-        "是否存在已过期事实或不应公开的语料？",
+        "是否存在应 RETIRE 的过期文章或不应公开语料？",
     ):
         add_list_item(doc, item)
     add_heading(doc, "12.3 什么时候重建画像", 2)
@@ -617,7 +634,7 @@ def build():
     add_heading(doc, "13. 测试与排错", 1)
     add_heading(doc, "13.1 离线测试", 2)
     add_code(doc, "$env:LLM_MODE=\"mock\"\npython -m unittest discover -s tests -v\npython -m scripts.smoke_test")
-    add_body(doc, "测试覆盖字符 n-gram、相关性排序、角色数据隔离、文章拆分、数字门禁、画像、生成—评审闭环和运行记录。mock 模式不会把文章发给外部模型。")
+    add_body(doc, "当前完整测试共 57 项，覆盖字符 n-gram、混合排序、角色隔离、批量导入与事务回滚、默认参数、反馈准入、人工审批、文章停用恢复、数字门禁、评测和完整运行轨迹。mock 模式不会把文章发给外部模型。")
     add_heading(doc, "13.2 常见问题", 2)
     add_table(doc, ["现象", "优先检查"], [
         ("/health 无法访问", "服务是否启动、端口是否为 8000、终端是否有报错"),
@@ -645,16 +662,23 @@ def build():
     add_table(doc, ["方法", "路径", "用途"], [
         ("GET", "/health", "检查服务、供应商、模型和检索模式"),
         ("GET", "/roles", "列出角色"),
-        ("POST", "/roles", "创建角色"),
+        ("POST/PATCH", "/roles · /roles/{id}", "创建或更新角色与默认任务参数"),
+        ("POST", "/roles/{id}/clone", "复制角色规则和默认参数，不复制记忆"),
         ("GET", "/posts?role_id=…", "查看角色文章"),
         ("POST", "/posts", "逐篇添加文章"),
-        ("POST", "/posts/upload", "上传并拆分 PDF/TXT/Markdown"),
+        ("POST", "/posts/bulk-upload", "批量上传、自动标注、去重并事务写入"),
+        ("PATCH", "/posts/bulk", "批量纠正文章元数据"),
+        ("POST", "/posts/{id}/retrieval-status", "停用或恢复文章的检索资格"),
         ("POST", "/profile/rebuild?role_id=…", "重建作者画像"),
         ("GET", "/profile?role_id=…", "查看最新画像"),
         ("POST", "/retrieve", "单独检查 RAG 结果"),
         ("POST", "/generate", "执行生成、评审和改写"),
-        ("POST", "/feedback", "保存本人终稿和修改原因"),
+        ("GET/POST", "/feedback", "查询反馈或创建候选反馈"),
+        ("POST", "/feedback/admission/bulk", "批量准入或拒绝候选反馈"),
+        ("GET", "/review-inbox", "分页查看待人工审核内容与摘要"),
+        ("POST", "/generations/{id}/review-actions", "编辑、批准或拒绝内容"),
         ("GET", "/generations/{run_id}", "回看一次生成运行"),
+        ("POST", "/eval-runs", "对已有生成运行执行确定性评测"),
     ], [1100, 3400, 4860])
 
     add_heading(doc, "附录 A：当前项目文件", 1)
@@ -662,10 +686,12 @@ def build():
         ("app/main.py", "FastAPI 接口"),
         ("app/db.py", "SQLite 数据库与角色隔离"),
         ("app/documents.py", "PDF/TXT/Markdown 提取与文章拆分"),
+        ("app/ingestion.py", "自动元数据、正文指纹、统一上传流程"),
         ("app/retrieval.py", "混合检索、评分解释与 MMR"),
         ("app/agent.py", "画像、生成、评审、改写与反馈编排"),
         ("app/llm.py", "DeepSeek Chat Completions 与 OpenAI Responses API"),
         ("app/models.py", "接口字段与校验"),
+        ("app/evals/", "确定性评测、运行比较和结果报告"),
         ("scripts/smoke_test.py", "不修改正式数据库的端到端冒烟测试"),
         ("RAG_DESIGN.md", "权重、评测、升级与生产化设计"),
     ], [3000, 6360], first_col_bold=True)
