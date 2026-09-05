@@ -6,3 +6,4 @@ __pycache__/
 data/*.db
 .qa/
 ~$*.docx
+*_最新版.docx
