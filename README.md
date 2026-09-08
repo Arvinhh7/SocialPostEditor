@@ -1,8 +1,34 @@
 # 个性化社交媒体写作 Agent
 
+## 第一次使用请从这里开始
+
+不需要了解 Python、API、RAG 或 Agent。请先打开下面的零基础手册，按顺序复制命令即可：
+
+- [在线阅读零基础使用手册](BEGINNER_USAGE_GUIDE.md)
+- [下载 Word 版零基础使用手册](个性化社交媒体写作Agent_零基础使用手册.docx)
+
+第一次运行不需要购买模型额度，也不需要填写 API Key。项目默认使用 `mock` 模式，可以先安全验证全部流程。
+
+Windows 用户安装 Git 和 Python 3.11 以后，在 PowerShell 依次执行：
+
+```powershell
+git clone https://github.com/Arvinhh7/SocialPostEditor.git
+cd SocialPostEditor
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+然后在浏览器打开 `http://127.0.0.1:8000/docs`。能看到接口列表，就说明安装和启动已经成功。下一步按照零基础手册依次完成创建角色、上传文章、重建画像、测试检索、生成内容和人工审批。
+
+遇到 PowerShell 不允许激活虚拟环境时不需要修改系统权限；上面的命令已经直接调用虚拟环境中的 Python，可以继续使用。
+
+## 项目简介
+
 这是根据《个性化社交媒体写作 Agent：Python + RAG 项目入门指南》实现的可运行 MVP。它把角色隔离、历史语料检索、双语作者画像、事实边界、生成、独立评审、定向改写和人工反馈串成一条完整链路。
 
-如果希望先按操作顺序上手，并查看每个状态分支为什么发生，请阅读 [简明使用手册](SIMPLE_USAGE_GUIDE.md)。适合初学者的概念说明见 [RAG 项目入门指南](个性化社交媒体写作Agent_RAG项目入门指南.docx)，完整操作步骤见 [详细使用手册](个性化社交媒体写作Agent_详细使用手册.docx)。
+如果希望进一步理解状态分支和系统设计，可继续阅读 [简明使用手册](SIMPLE_USAGE_GUIDE.md)、[RAG 项目入门指南](个性化社交媒体写作Agent_RAG项目入门指南.docx) 和 [详细使用手册](个性化社交媒体写作Agent_详细使用手册.docx)。
 
 项目支持两种运行模式和两个在线供应商：
 
